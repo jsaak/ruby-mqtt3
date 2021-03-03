@@ -9,14 +9,19 @@ class Mqtt3
   attr_accessor :ip
   attr_accessor :reconnect
   attr_accessor :keepalive_sec
+  attr_accessor :client_id
   attr_accessor :clean_session
   attr_accessor :will_topic
   attr_accessor :will_payload
   attr_accessor :will_qos
   attr_accessor :will_retain
+  attr_accessor :username
+  attr_accessor :password
+
 
   #internal state
   attr_reader :last_packet_sent_at
+  attr_reader :packet_id
   attr_reader :state
 
   MQTT_PACKET_TYPES = [
@@ -35,25 +40,39 @@ class Mqtt3
     'PINGREQ', #12
     'PINGRESP', #13
     'DISCONNECT', #14
-    'RESERVED' ]
+    'RESERVED' ].freeze
 
-  def initialize(host,port,reconnect=true,keepalive_sec=30)
+  MQTT_CONNECT = 0x01
+  MQTT_PUBLISH = 0x03
+  MQTT_SUBSCRIBE = 0x08
+
+  def initialize(host,port,reconnect=true,keepalive_sec=30,client_id=nil,clean_session=true,will_topic=nil, will_payload=nil, will_qos=0, will_retain=false, username=nil, password=nil)
     @host = host
     @port = port
     @reconnect = reconnect
     @keepalive_sec = keepalive_sec
+    @client_id = client_id
+    if @client_id.nil?
+      @client_id = File.basename($0)[0..10]
+      charset = Array('A'..'Z') + Array('a'..'z') + Array('0'..'9')
+      @client_id += '-' + Array.new(8) { charset.sample }.join
+			puts @client_id
+      #TODO insert fiber id
+    end
+    @clean_session = clean_session
+    @will_topic = will_topic
+    @will_payload = will_payload
+    @will_qos = will_qos
+    @will_retain = will_retain
+    @username = username
+    @password = password
+
     @socket = nil
+    @packet_id = 0
     @qos1store = []
     @qos2store = []
     @packet_id = 0
     @running = true
-
-    #packets taken from strace -s 100 -x mosquitto_pub and _sub
-    @packet_connect = "\x10\x1d\x00\x04\x4d\x51\x54\x54\x04\x02\x00\x3c\x00\x11\x6d\x6f\x73\x71\x70\x75\x62\x7c\x32\x35\x35\x31\x32\x2d\x78\x31\x65".force_encoding('ASCII-8BIT')
-    @packet_publish_q0 = "\x30\x08\x00\x03\x31\x32\x33\x33\x34\x35".force_encoding('ASCII-8BIT')
-    #packet_publish_q1 = 
-    @packet_subscribe_test = "\x82\x09\x00\x01\x00\x04\x74\x65\x73\x74\x00".force_encoding('ASCII-8BIT')
-    #TODO qos 1 and 2
   end
 
   def pingreq
@@ -72,13 +91,120 @@ class Mqtt3
     send_packet("\xff\x00".force_encoding('ASCII-8BIT'))
   end
 
-  def publish(topic,message,qos = 0,retain = false)
+  def connect
+		body = encode_string('MQTT')
+    body += encode_bytes 0x04
+
+    flags = 0
+    flags |= 0x02 if @clean_session
+    flags |= 0x04 unless @will_topic.nil?
+    flags |= ((@will_qos & 0x03) << 3)
+    flags |= 0x20 if @will_retain
+    flags |= 0x40 unless @password.nil?
+    flags |= 0x80 unless @username.nil?
+    body += encode_bytes(flags)
+
+		body += encode_short(@keepalive_sec)
+		body += encode_string(@client_id)
+		unless will_topic.nil?
+			body += encode_string(@will_topic)
+			body += encode_string(@will_payload)
+		end
+		body += encode_string(@username) unless @username.nil?
+		body += encode_string(@password) unless @password.nil?
+
+    packet = encode_bytes(MQTT_CONNECT << 4)
+    packet += encode_length(body.length)
+    packet += body
+
+    send_packet(packet)
   end
 
   def subscribe(topic_list)
+    body = encode_short(next_packet_id())
     topic_list.each do |x|
-      #send_subscribe(topic,qos)
+      body += encode_string(x[0])
+      body += encode_bytes(x[1])
     end
+
+    flags = 2
+    packet = encode_bytes((MQTT_SUBSCRIBE << 4) + flags)
+    packet += encode_length(body.length)
+    packet += body
+
+    send_packet(packet)
+
+    @packet_subscribe_test = "\x82\x09\x00\x01\x00\x04\x74\x65\x73\x74\x00".force_encoding('ASCII-8BIT')
+  end
+
+  def publish(topic,message,qos = 0,retain = false)
+    raise 'Invalid topic name' if topic.nil? || topic.to_s.empty?
+    raise 'Invalid QoS' if qos < 0 || qos > 2
+
+    if qos == 1
+      @qos1store.push()
+    elsif qos == 2
+      @qos2store.push()
+    end
+
+    flags = 0
+    flags += 1 if retain
+    flags += qos << 1
+    #flags += 8 if duplicate
+
+    body = encode_string(topic)
+    body += encode_short(next_packet_id()) if qos > 0
+    body += message
+
+    packet = encode_bytes((MQTT_PUBLISH << 4) + flags)
+    packet += encode_length(body.length)
+    packet += body
+
+    send_packet(packet)
+  end
+
+  def next_packet_id
+    @packet_id += 1
+    @packet_id = 0 if @packet_id > 0xffff
+    return @packet_id
+  end
+
+	def encode_bytes(*bytes)
+		bytes.pack('C*')
+	end
+
+	def encode_bits(bits)
+		[bits.map { |b| b ? '1' : '0' }.join].pack('b*')
+	end
+
+	def encode_short(val)
+		raise 'Value too big for short' if val > 0xffff
+		[val.to_i].pack('n')
+	end
+
+	def encode_string(str)
+		str = str.to_s.encode('UTF-8')
+
+		# Force to binary, when assembling the packet
+		str.force_encoding('ASCII-8BIT')
+		encode_short(str.bytesize) + str
+	end
+
+  def encode_length(body_length)
+    if body_length > 268_435_455
+      raise 'Error serialising packet: body is more than 256MB'
+    end
+
+    x = ''
+    loop do
+      digit = (body_length % 128)
+      body_length = body_length.div(128)
+      # if there are more digits to encode, set the top bit of this digit
+      digit |= 0x80 if body_length > 0
+      x += digit.chr
+      break if body_length <= 0
+    end
+    return x
   end
 
   def send_packet(p)
@@ -147,7 +273,7 @@ class Mqtt3
     end
   end
 
-  def connect()
+  def tcp_connect()
     counter = 0
     begin
       @socket = TCPSocket.new(@host, @port, connect_timeout: 1)
@@ -187,8 +313,8 @@ class Mqtt3
         @state = :disconnected
         @on_disconnect_block.call unless @on_disconnect_block.nil?
         if @reconnect
-          @socket = connect()
-          send_packet(@packet_connect)
+          @socket = tcp_connect()
+          connect()
         else
           @running = false
           raise Mqtt3TcpDisconnected
@@ -203,7 +329,7 @@ class Mqtt3
   def run
     Fiber.schedule do
       @state = :disconnected
-      @socket = connect()
+      @socket = tcp_connect()
 
       Fiber.schedule do
         #puts 'entering recv fiber'
@@ -253,7 +379,7 @@ class Mqtt3
       end
 
       if @running
-        send_packet(@packet_connect)
+        connect()
       end
     end
   end

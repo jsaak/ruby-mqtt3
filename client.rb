@@ -21,7 +21,7 @@ end
 
 Fiber.set_scheduler scheduler
 
-m = Mqtt3.new('localhost',1883,false,30)
+m = Mqtt3.new('localhost',1883,true,30)
 
 m.debug = true
 
@@ -31,7 +31,9 @@ end
 
 m.on_connect do |session_present|
   m.debug 'on_connect'
-  m.invalid
+  m.subscribe [['test',0]]
+  m.publish 'test', 'demo'
+  #m.invalid
   #puts session_present
   #m.publish('test','message')
 end
