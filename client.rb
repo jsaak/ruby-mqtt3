@@ -21,7 +21,7 @@ end
 
 Fiber.set_scheduler scheduler
 
-m = Mqtt3.new('localhost',1883,true,30)
+m = Mqtt3.new(keepalive_sec: 30, persistence_filename: 'persist.data', clean_session: false)
 
 m.debug = true
 
@@ -32,7 +32,6 @@ end
 m.on_connect do |session_present|
   m.debug 'on_connect'
   m.subscribe [['test',0]]
-  m.publish 'test', 'demo'
   #m.invalid
   #puts session_present
   #m.publish('test','message')
@@ -45,10 +44,10 @@ end
 
 m.run
 
-#Fiber.schedule do
-  #sleep 10
-  #m.pingreq
-#end
+Fiber.schedule do
+  sleep 6
+  m.publish 'test', 'demo', 1
+end
 
 if backend == 'async'
   reactor.run

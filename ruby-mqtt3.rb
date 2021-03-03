@@ -17,6 +17,7 @@ class Mqtt3
   attr_accessor :will_retain
   attr_accessor :username
   attr_accessor :password
+  attr_accessor :persistence_filename
 
 
   #internal state
@@ -46,7 +47,19 @@ class Mqtt3
   MQTT_PUBLISH = 0x03
   MQTT_SUBSCRIBE = 0x08
 
-  def initialize(host,port,reconnect=true,keepalive_sec=30,client_id=nil,clean_session=true,will_topic=nil, will_payload=nil, will_qos=0, will_retain=false, username=nil, password=nil)
+  def initialize(host: 'localhost',
+                 port: 1883,
+                 reconnect: true,
+                 keepalive_sec: 30,
+                 client_id: nil,
+                 clean_session: true,
+                 will_topic: nil,
+                 will_payload: nil,
+                 will_qos: 0,
+                 will_retain: false,
+                 username: nil,
+                 password: nil,
+                 persistence_filename: nil)
     @host = host
     @port = port
     @reconnect = reconnect
@@ -66,11 +79,12 @@ class Mqtt3
     @will_retain = will_retain
     @username = username
     @password = password
+    @persistence_filename = persistence_filename
 
     @socket = nil
     @packet_id = 0
-    @qos1store = []
-    @qos2store = []
+    @qos1store = Hash.new
+    @qos2store = Hash.new
     @packet_id = 0
     @running = true
   end
@@ -92,7 +106,7 @@ class Mqtt3
   end
 
   def connect
-		body = encode_string('MQTT')
+    body = encode_string('MQTT')
     body += encode_bytes 0x04
 
     flags = 0
@@ -104,14 +118,14 @@ class Mqtt3
     flags |= 0x80 unless @username.nil?
     body += encode_bytes(flags)
 
-		body += encode_short(@keepalive_sec)
-		body += encode_string(@client_id)
-		unless will_topic.nil?
-			body += encode_string(@will_topic)
-			body += encode_string(@will_payload)
-		end
-		body += encode_string(@username) unless @username.nil?
-		body += encode_string(@password) unless @password.nil?
+    body += encode_short(@keepalive_sec)
+    body += encode_string(@client_id)
+    unless will_topic.nil?
+      body += encode_string(@will_topic)
+      body += encode_string(@will_payload)
+    end
+    body += encode_string(@username) unless @username.nil?
+    body += encode_string(@password) unless @password.nil?
 
     packet = encode_bytes(MQTT_CONNECT << 4)
     packet += encode_length(body.length)
@@ -138,22 +152,35 @@ class Mqtt3
   end
 
   def publish(topic,message,qos = 0,retain = false)
+    publish_dup(topic,message,qos,retain,false,nil)
+    if @state != :mqtt_connected
+      save()
+    end
+  end
+
+  def publish_dup(topic,message,qos = 0,retain = false, dup = false, packet_id = nil)
     raise 'Invalid topic name' if topic.nil? || topic.to_s.empty?
     raise 'Invalid QoS' if qos < 0 || qos > 2
 
-    if qos == 1
-      @qos1store.push()
-    elsif qos == 2
-      @qos2store.push()
+    # first publish
+    if packet_id.nil?
+      packet_id = next_packet_id()
+
+      if qos == 1
+        @qos1store[packet_id] = [topic,message,qos,retain]
+      elsif qos == 2
+        @qos2store[packet_id] = [topic,message,qos,retain]
+      end
     end
+
 
     flags = 0
     flags += 1 if retain
     flags += qos << 1
-    #flags += 8 if duplicate
+    flags += 8 if dup
 
     body = encode_string(topic)
-    body += encode_short(next_packet_id()) if qos > 0
+    body += encode_short(packet_id) if qos > 0
     body += message
 
     packet = encode_bytes((MQTT_PUBLISH << 4) + flags)
@@ -161,6 +188,7 @@ class Mqtt3
     packet += body
 
     send_packet(packet)
+    return packet_id
   end
 
   def next_packet_id
@@ -169,26 +197,26 @@ class Mqtt3
     return @packet_id
   end
 
-	def encode_bytes(*bytes)
-		bytes.pack('C*')
-	end
+  def encode_bytes(*bytes)
+    bytes.pack('C*')
+  end
 
-	def encode_bits(bits)
-		[bits.map { |b| b ? '1' : '0' }.join].pack('b*')
-	end
+  def encode_bits(bits)
+    [bits.map { |b| b ? '1' : '0' }.join].pack('b*')
+  end
 
-	def encode_short(val)
-		raise 'Value too big for short' if val > 0xffff
-		[val.to_i].pack('n')
-	end
+  def encode_short(val)
+    raise 'Value too big for short' if val > 0xffff
+    [val.to_i].pack('n')
+  end
 
-	def encode_string(str)
-		str = str.to_s.encode('UTF-8')
-
-		# Force to binary, when assembling the packet
-		str.force_encoding('ASCII-8BIT')
-		encode_short(str.bytesize) + str
-	end
+  def encode_string(str)
+    # i do not understand why we need these
+    #str = str.to_s.encode('UTF-8')
+    # Force to binary, when assembling the packet
+    #str.force_encoding('ASCII-8BIT')
+    encode_short(str.bytesize) + str
+  end
 
   def encode_length(body_length)
     if body_length > 268_435_455
@@ -207,8 +235,12 @@ class Mqtt3
     return x
   end
 
+  def decode_short(bytes)
+    bytes.unpack('n').first
+  end
+
   def send_packet(p)
-    debug 'sending packet: ' + p.unpack('H*').first
+    debug '--- ' + MQTT_PACKET_TYPES[p[0].ord >> 4] + ' flags: ' + (p[0].ord & 0x0f).to_s + '  ' + p.unpack('H*').first
     begin
       @socket.send(p,0)
       @last_packet_sent_at = Time.now
@@ -247,7 +279,7 @@ class Mqtt3
   end
 
   def handle_packet(type,flags,length,data)
-    debug "incoming packet: #{MQTT_PACKET_TYPES[type]} (#{type})  flags: #{flags}  length: #{length}  data: #{data.unpack('H*').first}"
+    debug "+++ #{MQTT_PACKET_TYPES[type]} flags: #{flags}  length: #{length}  data: #{data.unpack('H*').first}"
     case type
     when 2 #CONNACK
       return_code = data[1].ord
@@ -255,13 +287,24 @@ class Mqtt3
         @state = :mqtt_connected
         session_present = (data[0].ord == 1)
         @on_connect_block.call(session_present) unless @on_connect_block.nil?
+
+        #sending QoS 1 and Qos2 messages
+        @qos1store.each do |packet_id,m|
+          publish_dup(m[0],m[1],m[2],m[3], true)
+        end
       else
         @on_mqtt_connect_error_block.call(return_code) unless @on_mqtt_connect_error_block.nil?
       end
     when 3 #PUBLISH
       #@on_message_block.call(topic, message) unless @on_message.nil?
     when 4 #PUBACK
-      #@on_publish_finished_block.call(topic_name, packet_id, ret) unless @on_publish_finished_block.nil?
+      packet_id = decode_short(data)
+      if @qos1store.has_key? (packet_id)
+        @qos1store.delete(packet_id)
+        @on_publish_finished_block.call(packet_id) unless @on_publish_finished_block.nil?
+      else
+        debug "WARNING: PUBACK #{packet_id} not found"
+      end
     when 6 #PUBREL
       #@on_publish_finished_block.call(topic_name, packet_id, ret) unless @on_publish_finished_block.nil?
     when 9 #SUBACK
@@ -304,6 +347,15 @@ class Mqtt3
     end
   end
 
+  def save
+    if @persistence_filename
+      File.open(@persistence_filename,"w+") do |f|
+        debug "saving state to " + @persistence_filename
+        f.write Marshal.dump([@qos1store,@qos2store])
+      end
+    end
+  end
+
   def recv_bytes(count)
     buffer = ''
     while buffer.length != count
@@ -311,6 +363,9 @@ class Mqtt3
       chunk = @socket.recv(count - buffer.length)
       if chunk == ''
         @state = :disconnected
+
+        save()
+
         @on_disconnect_block.call unless @on_disconnect_block.nil?
         if @reconnect
           @socket = tcp_connect()
@@ -327,6 +382,20 @@ class Mqtt3
   end
 
   def run
+    if @persistence_filename
+      if @clean_session
+        if File.exist?(@persistence_filename)
+          debug "removing file " + @persistence_filename
+          File.delete(@persistence_filename)
+        end
+      else
+        if File.exist?(@persistence_filename)
+          debug "loading state from " + @persistence_filename
+          @qos1store, @qos2store = Marshal.load(File.read(@persistence_filename))
+        end
+      end
+    end
+
     Fiber.schedule do
       @state = :disconnected
       @socket = tcp_connect()
