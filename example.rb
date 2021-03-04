@@ -21,7 +21,10 @@ end
 
 Fiber.set_scheduler scheduler
 
-m = Mqtt3.new(keepalive_sec: 30, persistence_filename: 'persist.data', clean_session: false)
+m = Mqtt3.new(keepalive_sec: 30,
+              persistence_filename: 'persist.data',
+              clean_session: false,
+             )
 
 m.debug = true
 

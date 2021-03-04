@@ -1,3 +1,5 @@
+require 'openssl'
+
 class Mqtt3TcpDisconnected < Exception
 end
 
@@ -19,11 +21,19 @@ class Mqtt3
   attr_accessor :password
   attr_accessor :persistence_filename
 
+  attr_accessor :ssl
+  attr_accessor :ssl_cert
+  attr_accessor :ssl_cert_file
+  attr_accessor :ssl_key
+  attr_accessor :ssl_key_file
+  attr_accessor :ssl_ca_file
+  attr_accessor :ssl_passphrase
 
   #internal state
   attr_reader :last_packet_sent_at
   attr_reader :packet_id
   attr_reader :state
+  attr_reader :ssl_context
 
   MQTT_PACKET_TYPES = [
     'INVALID', #0
@@ -70,7 +80,14 @@ class Mqtt3
                  will_retain: false,
                  username: nil,
                  password: nil,
-                 persistence_filename: nil)
+                 persistence_filename: nil,
+                 ssl: nil,
+                 ssl_cert: nil,
+                 ssl_cert_file: nil,
+                 ssl_key: nil,
+                 ssl_key_file: nil,
+                 ssl_ca_file: nil,
+                 ssl_passphrase: nil)
     @host = host
     @port = port
     @reconnect = reconnect
@@ -90,6 +107,16 @@ class Mqtt3
     @username = username
     @password = password
     @persistence_filename = persistence_filename
+
+    @ssl = ssl
+    @ssl_cert = ssl_cert
+    @ssl_cert_file = ssl_cert_file
+    @ssl_key = ssl_key
+    @ssl_key_file = ssl_key_file
+    @ssl_ca_file = ssl_ca_file
+    @ssl_passphrase = ssl_passphrase
+
+    init_ssl() if @ssl
 
     @socket = nil
     @packet_id = 0
@@ -243,10 +270,10 @@ class Mqtt3
   end
 
   def encode_string(str)
-    # i do not understand why we need these
-    #str = str.to_s.encode('UTF-8')
+    str = str.to_s.encode('UTF-8')
+
     # Force to binary, when assembling the packet
-    #str.force_encoding('ASCII-8BIT')
+    str.force_encoding('ASCII-8BIT')
     encode_short(str.bytesize) + str
   end
 
@@ -272,13 +299,16 @@ class Mqtt3
   end
 
   def send_packet(p)
+    return if state == :disconnected
+    return if state == :tcp_connected && ((p[0].ord >> 4) != CONNECT)
+
     debug '--- ' + MQTT_PACKET_TYPES[p[0].ord >> 4] + ' flags: ' + (p[0].ord & 0x0f).to_s + '  ' + p.unpack('H*').first
+
     begin
-      @socket.send(p,0)
+      @socket.write(p)
       @last_packet_sent_at = Time.now
     rescue => e
-      puts e
-      puts e.message
+      raise e
     end
   end
 
@@ -397,7 +427,18 @@ class Mqtt3
   def tcp_connect()
     counter = 0
     begin
-      @socket = TCPSocket.new(@host, @port, connect_timeout: 1)
+      tcp_socket = TCPSocket.new(@host, @port, connect_timeout: 1)
+
+			if @ssl
+				@socket = OpenSSL::SSL::SSLSocket.new(tcp_socket, @ssl_context)
+				@socket.sync_close = true
+				# Set hostname on secure socket for Server Name Indication (SNI)
+				#TODO ??? @socket.hostname = @host if @socket.respond_to?(:hostname=)
+				@socket.connect
+			else
+				@socket = tcp_socket
+			end
+
       @state = :tcp_connected
       debug 'TCP connected'
       return @socket
@@ -438,7 +479,7 @@ class Mqtt3
     buffer = ''
     while buffer.length != count
       #TODO rescue
-      chunk = @socket.recv(count - buffer.length)
+      chunk = @socket.read(count - buffer.length)
       if chunk == ''
         @state = :disconnected
 
@@ -459,7 +500,32 @@ class Mqtt3
     return buffer
   end
 
+  def init_ssl
+    if (@ssl &&
+        (@ssl_cert or @ssl_cert_file) &&
+        (@ssl_ca_file) &&
+        (@ssl_key or @ssl_key_file))
+
+      @ssl_cert = File.read(@ssl_cert_file) if @ssl_cert_file
+      @ssl_key = File.read(@ssl_key_file) if @ssl_key_file
+
+      @ssl_context = OpenSSL::SSL::SSLContext.new
+
+      unless @ssl.is_a?(TrueClass)
+        @ssl_context.ssl_version = @ssl
+      end
+
+      @ssl_context.cert = OpenSSL::X509::Certificate.new(@ssl_cert)
+      @ssl_context.key  = OpenSSL::PKey::RSA.new(@ssl_key, @ssl_passphrase)
+      @ssl_context.ca_file  = @ssl_ca_file
+      @ssl_context.verify_mode = OpenSSL::SSL::VERIFY_PEER
+    else
+      raise "missing ssl param"
+    end
+  end
+
   def run
+    #persistence
     if @persistence_filename
       if @clean_session
         if File.exist?(@persistence_filename)
