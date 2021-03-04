@@ -31,7 +31,7 @@ end
 
 m.on_connect do |session_present|
   m.debug 'on_connect'
-  m.subscribe [['test',0]]
+  m.subscribe [['test',2]]
   #m.invalid
   #puts session_present
   #m.publish('test','message')
@@ -42,11 +42,15 @@ m.on_tcp_connect_error do |e,counter|
   true
 end
 
+m.on_message do |topic, message, qos, packet_id|
+  m.debug "Incoming topic: #{topic} message: #{message} qos: #{qos} packet_id: #{packet_id}"
+end
+
 m.run
 
 Fiber.schedule do
-  sleep 6
-  m.publish 'test', 'demo', 1
+  sleep 1
+  m.publish 'test', 'demo', 2
 end
 
 if backend == 'async'

@@ -43,9 +43,20 @@ class Mqtt3
     'DISCONNECT', #14
     'RESERVED' ].freeze
 
-  MQTT_CONNECT = 0x01
-  MQTT_PUBLISH = 0x03
-  MQTT_SUBSCRIBE = 0x08
+  CONNECT = 1
+  CONNACK = 2
+  PUBLISH = 3
+  PUBACK = 4
+  PUBREC = 5
+  PUBREL = 6
+  PUBCOMP = 7
+  SUBSCRIBE = 8
+  SUBACK = 9
+  UNSUBSCRIBE = 10
+  UNSUBACK = 11
+  PINGREQ = 12
+  PINGRESP = 13
+  DISCONNECT = 14
 
   def initialize(host: 'localhost',
                  port: 1883,
@@ -69,7 +80,6 @@ class Mqtt3
       @client_id = File.basename($0)[0..10]
       charset = Array('A'..'Z') + Array('a'..'z') + Array('0'..'9')
       @client_id += '-' + Array.new(8) { charset.sample }.join
-			puts @client_id
       #TODO insert fiber id
     end
     @clean_session = clean_session
@@ -90,15 +100,15 @@ class Mqtt3
   end
 
   def pingreq
-    send_packet("\xc0\x00".force_encoding('ASCII-8BIT'))
+    send_packet("\xc0\x00".force_encoding('ASCII-8BIT')) #PINGREQ
   end
 
   def pingresp
-    send_packet("\xd0\x00".force_encoding('ASCII-8BIT'))
+    send_packet("\xd0\x00".force_encoding('ASCII-8BIT')) #PINGRESP
   end
 
   def disconnect
-    send_packet("\xe0\x00".force_encoding('ASCII-8BIT'))
+    send_packet("\xe0\x00".force_encoding('ASCII-8BIT')) #DISCONNECT
   end
 
   def invalid
@@ -127,7 +137,7 @@ class Mqtt3
     body += encode_string(@username) unless @username.nil?
     body += encode_string(@password) unless @password.nil?
 
-    packet = encode_bytes(MQTT_CONNECT << 4)
+    packet = encode_bytes(CONNECT << 4)
     packet += encode_length(body.length)
     packet += body
 
@@ -142,13 +152,11 @@ class Mqtt3
     end
 
     flags = 2
-    packet = encode_bytes((MQTT_SUBSCRIBE << 4) + flags)
+    packet = encode_bytes((SUBSCRIBE << 4) + flags)
     packet += encode_length(body.length)
     packet += body
 
     send_packet(packet)
-
-    @packet_subscribe_test = "\x82\x09\x00\x01\x00\x04\x74\x65\x73\x74\x00".force_encoding('ASCII-8BIT')
   end
 
   def publish(topic,message,qos = 0,retain = false)
@@ -169,7 +177,7 @@ class Mqtt3
       if qos == 1
         @qos1store[packet_id] = [topic,message,qos,retain]
       elsif qos == 2
-        @qos2store[packet_id] = [topic,message,qos,retain]
+        @qos2store[packet_id] = [topic,message,qos,retain,PUBLISH]
       end
     end
 
@@ -183,12 +191,36 @@ class Mqtt3
     body += encode_short(packet_id) if qos > 0
     body += message
 
-    packet = encode_bytes((MQTT_PUBLISH << 4) + flags)
+    packet = encode_bytes((PUBLISH << 4) + flags)
     packet += encode_length(body.length)
     packet += body
 
     send_packet(packet)
     return packet_id
+  end
+
+  def puback(packet_id)
+    packet = "\x42\x02".force_encoding('ASCII-8BIT') #PUBACK
+    packet += encode_short(packet_id)
+    send_packet(packet)
+  end
+
+  def pubrec(packet_id)
+    packet = "\x52\x02".force_encoding('ASCII-8BIT') #PUBREC
+    packet += encode_short(packet_id)
+    send_packet(packet)
+  end
+
+  def pubrel(packet_id)
+    packet = "\x62\x02".force_encoding('ASCII-8BIT') #PUBREL
+    packet += encode_short(packet_id)
+    send_packet(packet)
+  end
+
+  def pubcomp(packet_id)
+    packet = "\x72\x02".force_encoding('ASCII-8BIT') #PUBCOMP
+    packet += encode_short(packet_id)
+    send_packet(packet)
   end
 
   def next_packet_id
@@ -275,13 +307,13 @@ class Mqtt3
   end
 
   def on_message(&block)
-    @on_message = block
+    @on_message_block = block
   end
 
   def handle_packet(type,flags,length,data)
     debug "+++ #{MQTT_PACKET_TYPES[type]} flags: #{flags}  length: #{length}  data: #{data.unpack('H*').first}"
     case type
-    when 2 #CONNACK
+    when CONNACK
       return_code = data[1].ord
       if return_code == 0
         @state = :mqtt_connected
@@ -290,14 +322,27 @@ class Mqtt3
 
         #sending QoS 1 and Qos2 messages
         @qos1store.each do |packet_id,m|
-          publish_dup(m[0],m[1],m[2],m[3], true)
+          publish_dup(m[0],m[1],m[2],m[3],true,packet_id)
         end
       else
         @on_mqtt_connect_error_block.call(return_code) unless @on_mqtt_connect_error_block.nil?
       end
-    when 3 #PUBLISH
-      #@on_message_block.call(topic, message) unless @on_message.nil?
-    when 4 #PUBACK
+
+    when PUBLISH
+      qos = (flags & 6) >> 1
+      topic_length = decode_short(data[0..1])
+      topic = data[2..topic_length+2]
+      packet_id = decode_short(data[topic_length+2..topic_length+3])
+      message = data[topic_length+4..-1]
+
+      if qos == 1
+        puback(packet_id)
+      elsif qos == 2
+        pubrec(packet_id)
+      end
+      @on_message_block.call(topic, message, qos, packet_id) unless @on_message_block.nil?
+
+    when PUBACK
       packet_id = decode_short(data)
       if @qos1store.has_key? (packet_id)
         @qos1store.delete(packet_id)
@@ -305,14 +350,47 @@ class Mqtt3
       else
         debug "WARNING: PUBACK #{packet_id} not found"
       end
-    when 6 #PUBREL
-      #@on_publish_finished_block.call(topic_name, packet_id, ret) unless @on_publish_finished_block.nil?
-    when 9 #SUBACK
+
+    when PUBREC
+      packet_id = decode_short(data)
+      p = @qos2store[packet_id]
+      unless p.nil?
+        if p[4] == PUBLISH
+          @qos2store[packet_id][4] = PUBREL
+          pubrel(packet_id)
+        else
+          debug "WARNING: PUBREC #{packet_id} not in PUBLISH state"
+        end
+      else
+        debug "WARNING: PUBREC #{packet_id} not found"
+      end
+
+    when PUBREL
+      packet_id = decode_short(data)
+      pubcomp(packet_id)
+
+    when PUBCOMP
+      packet_id = decode_short(data)
+      p = @qos2store[packet_id]
+      unless p.nil?
+        if p[4] == PUBREL
+          @qos2store.delete(packet_id)
+        else
+          debug "WARNING: PUBCOMP #{packet_id} not in PUBLISH state"
+        end
+      else
+        debug "WARNING: PUBCOMP #{packet_id} not found"
+      end
+
+    when SUBACK
       # for each topic
       #@on_subscribe_block.call(topic_name, packet_id, ret)
-    when 12 #PINGREQ
+
+    when PINGREQ
       pingresp
+    when PINGRESP
     else
+      debug "WARNING: packet type: #{type} is not handled"
     end
   end
 
