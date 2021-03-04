@@ -429,15 +429,15 @@ class Mqtt3
     begin
       tcp_socket = TCPSocket.new(@host, @port, connect_timeout: 1)
 
-			if @ssl
-				@socket = OpenSSL::SSL::SSLSocket.new(tcp_socket, @ssl_context)
-				@socket.sync_close = true
-				# Set hostname on secure socket for Server Name Indication (SNI)
-				#TODO ??? @socket.hostname = @host if @socket.respond_to?(:hostname=)
-				@socket.connect
-			else
-				@socket = tcp_socket
-			end
+      if @ssl
+        @socket = OpenSSL::SSL::SSLSocket.new(tcp_socket, @ssl_context)
+        @socket.sync_close = true
+        # Set hostname on secure socket for Server Name Indication (SNI)
+        #TODO ??? @socket.hostname = @host if @socket.respond_to?(:hostname=)
+        @socket.connect
+      else
+        @socket = tcp_socket
+      end
 
       @state = :tcp_connected
       debug 'TCP connected'
