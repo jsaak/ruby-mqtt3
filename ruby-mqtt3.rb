@@ -20,6 +20,7 @@ class Mqtt3
   attr_accessor :username
   attr_accessor :password
   attr_accessor :persistence_filename
+  attr_accessor :persistence_mode
 
   attr_accessor :ssl
   attr_accessor :ssl_cert
@@ -81,6 +82,7 @@ class Mqtt3
                  username: nil,
                  password: nil,
                  persistence_filename: nil,
+                 persistence_mode: :save_manual, # or :save_everytime
                  ssl: nil,
                  ssl_cert: nil,
                  ssl_cert_file: nil,
@@ -97,7 +99,6 @@ class Mqtt3
       @client_id = File.basename($0)[0..10]
       charset = Array('A'..'Z') + Array('a'..'z') + Array('0'..'9')
       @client_id += '-' + Array.new(8) { charset.sample }.join
-      #TODO insert fiber id
     end
     @clean_session = clean_session
     @will_topic = will_topic
@@ -107,6 +108,7 @@ class Mqtt3
     @username = username
     @password = password
     @persistence_filename = persistence_filename
+    @persistence_mode = persistence_mode
 
     @ssl = ssl
     @ssl_cert = ssl_cert
@@ -124,6 +126,7 @@ class Mqtt3
     @qos2store = Hash.new
     @packet_id = 0
     @running = true
+    @state = :disconnected
   end
 
   def pingreq
@@ -188,9 +191,6 @@ class Mqtt3
 
   def publish(topic,message,qos = 0,retain = false)
     publish_dup(topic,message,qos,retain,false,nil)
-    if @state != :mqtt_connected
-      save()
-    end
   end
 
   def publish_dup(topic,message,qos = 0,retain = false, dup = false, packet_id = nil)
@@ -206,6 +206,7 @@ class Mqtt3
       elsif qos == 2
         @qos2store[packet_id] = [topic,message,qos,retain,PUBLISH]
       end
+      save_everytime()
     end
 
 
@@ -352,7 +353,18 @@ class Mqtt3
 
         #sending QoS 1 and Qos2 messages
         @qos1store.each do |packet_id,m|
+          debug "resending QoS 1 packet #{packet_id} #{m[0]} #{m[1]}"
           publish_dup(m[0],m[1],m[2],m[3],true,packet_id)
+        end
+        @qos2store.each do |packet_id,m|
+          state = m[4]
+          if state == PUBLISH
+            debug "resending QoS 2 packet PUBLISH #{packet_id} #{m[0]} #{m[1]}"
+            publish_dup(m[0],m[1],m[2],m[3],true,packet_id)
+          elsif state == PUBREL
+            debug "resending QoS 2 packet PUBREL #{packet_id} #{m[0]} #{m[1]}"
+            pubrel(packet_id)
+          end
         end
       else
         @on_mqtt_connect_error_block.call(return_code) unless @on_mqtt_connect_error_block.nil?
@@ -376,6 +388,7 @@ class Mqtt3
       packet_id = decode_short(data)
       if @qos1store.has_key? (packet_id)
         @qos1store.delete(packet_id)
+        save_everytime()
         @on_publish_finished_block.call(packet_id) unless @on_publish_finished_block.nil?
       else
         debug "WARNING: PUBACK #{packet_id} not found"
@@ -387,6 +400,7 @@ class Mqtt3
       unless p.nil?
         if p[4] == PUBLISH
           @qos2store[packet_id][4] = PUBREL
+          save_everytime()
           pubrel(packet_id)
         else
           debug "WARNING: PUBREC #{packet_id} not in PUBLISH state"
@@ -405,6 +419,8 @@ class Mqtt3
       unless p.nil?
         if p[4] == PUBREL
           @qos2store.delete(packet_id)
+          @on_publish_finished_block.call(packet_id) unless @on_publish_finished_block.nil?
+          save_everytime()
         else
           debug "WARNING: PUBCOMP #{packet_id} not in PUBLISH state"
         end
@@ -418,6 +434,7 @@ class Mqtt3
 
     when PINGREQ
       pingresp
+
     when PINGRESP
     else
       debug "WARNING: packet type: #{type} is not handled"
@@ -466,6 +483,12 @@ class Mqtt3
     end
   end
 
+  def save_everytime
+    if @persistence_filename && (@persistence_mode == :save_everytime)
+      save
+    end
+  end
+
   def save
     if @persistence_filename
       File.open(@persistence_filename,"w+") do |f|
@@ -482,8 +505,6 @@ class Mqtt3
       chunk = @socket.read(count - buffer.length)
       if chunk == ''
         @state = :disconnected
-
-        save()
 
         @on_disconnect_block.call unless @on_disconnect_block.nil?
         if @reconnect
@@ -534,14 +555,13 @@ class Mqtt3
         end
       else
         if File.exist?(@persistence_filename)
-          debug "loading state from " + @persistence_filename
           @qos1store, @qos2store = Marshal.load(File.read(@persistence_filename))
+          debug "loading state from #{@persistence_filename}  QoS1:#{@qos1store.inspect}  QoS2:#{@qos2store.inspect}"
         end
       end
     end
 
     Fiber.schedule do
-      @state = :disconnected
       @socket = tcp_connect()
 
       Fiber.schedule do

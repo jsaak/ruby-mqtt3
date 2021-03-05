@@ -34,7 +34,7 @@ end
 
 m.on_connect do |session_present|
   m.debug 'on_connect'
-  m.subscribe [['test',2]]
+  m.subscribe [['test',2],['test2',0]]
   #m.invalid
   #puts session_present
   #m.publish('test','message')
@@ -49,11 +49,25 @@ m.on_message do |topic, message, qos, packet_id|
   m.debug "Incoming topic: #{topic} message: #{message} qos: #{qos} packet_id: #{packet_id}"
 end
 
+m.on_publish_finished do |packet_id|
+  m.debug "packet published #{packet_id}"
+end
+
+Signal.trap("INT") do
+  m.save
+  exit
+end
+
+Signal.trap("TERM") do
+  m.save
+  exit
+end
+
 m.run
 
 Fiber.schedule do
   sleep 1
-  m.publish 'test', 'demo', 2
+  packet_id = m.publish 'test', 'demo', 2
 end
 
 if backend == 'async'
