@@ -122,8 +122,10 @@ class Mqtt3
 
     @socket = nil
     @packet_id = 0
-    @qos1store = Hash.new
-    @qos2store = Hash.new
+    @outgoing_qos1_store = Hash.new
+    @outgoing_qos2_store = Hash.new
+    @incoming_qos1_store = Hash.new
+    @incoming_qos2_store = Hash.new
     @packet_id = 0
     @running = true
     @state = :disconnected
@@ -202,9 +204,9 @@ class Mqtt3
       packet_id = next_packet_id()
 
       if qos == 1
-        @qos1store[packet_id] = [topic,message,qos,retain]
+        @outgoing_qos1_store[packet_id] = [topic,message,qos,retain]
       elsif qos == 2
-        @qos2store[packet_id] = [topic,message,qos,retain,PUBLISH]
+        @outgoing_qos2_store[packet_id] = [topic,message,qos,retain,PUBLISH]
       end
       save_everytime()
     end
@@ -231,6 +233,8 @@ class Mqtt3
     packet = "\x42\x02".force_encoding('ASCII-8BIT') #PUBACK
     packet += encode_short(packet_id)
     send_packet(packet)
+    @incoming_qos1_store.delete packet_id
+    save_everytime
   end
 
   def pubrec(packet_id)
@@ -249,6 +253,8 @@ class Mqtt3
     packet = "\x72\x02".force_encoding('ASCII-8BIT') #PUBCOMP
     packet += encode_short(packet_id)
     send_packet(packet)
+    @incoming_qos2_store.delete packet_id
+    save_everytime
   end
 
   def next_packet_id
@@ -352,11 +358,11 @@ class Mqtt3
         @on_connect_block.call(session_present) unless @on_connect_block.nil?
 
         #sending QoS 1 and Qos2 messages
-        @qos1store.each do |packet_id,m|
+        @outgoing_qos1_store.each do |packet_id,m|
           debug "resending QoS 1 packet #{packet_id} #{m[0]} #{m[1]}"
           publish_dup(m[0],m[1],m[2],m[3],true,packet_id)
         end
-        @qos2store.each do |packet_id,m|
+        @outgoing_qos2_store.each do |packet_id,m|
           state = m[4]
           if state == PUBLISH
             debug "resending QoS 2 packet PUBLISH #{packet_id} #{m[0]} #{m[1]}"
@@ -377,17 +383,28 @@ class Mqtt3
       packet_id = decode_short(data[topic_length+2..topic_length+3])
       message = data[topic_length+4..-1]
 
-      if qos == 1
+      if qos == 0
+        @on_message_block.call(topic, message, qos, packet_id) unless @on_message_block.nil?
+      elsif qos == 1
         puback(packet_id)
+        if @incoming_qos1_store[packet_id].nil?
+          @incoming_qos1_store[packet_id] = true
+          save_everytime
+          @on_message_block.call(topic, message, qos, packet_id) unless @on_message_block.nil?
+        end
       elsif qos == 2
         pubrec(packet_id)
+        if @incoming_qos2_store[packet_id].nil?
+          @incoming_qos2_store[packet_id] = true
+          save_everytime
+          @on_message_block.call(topic, message, qos, packet_id) unless @on_message_block.nil?
+        end
       end
-      @on_message_block.call(topic, message, qos, packet_id) unless @on_message_block.nil?
 
     when PUBACK
       packet_id = decode_short(data)
-      if @qos1store.has_key? (packet_id)
-        @qos1store.delete(packet_id)
+      if @outgoing_qos1_store.has_key?(packet_id)
+        @outgoing_qos1_store.delete(packet_id)
         save_everytime()
         @on_publish_finished_block.call(packet_id) unless @on_publish_finished_block.nil?
       else
@@ -396,10 +413,10 @@ class Mqtt3
 
     when PUBREC
       packet_id = decode_short(data)
-      p = @qos2store[packet_id]
+      p = @outgoing_qos2_store[packet_id]
       unless p.nil?
         if p[4] == PUBLISH
-          @qos2store[packet_id][4] = PUBREL
+          @outgoing_qos2_store[packet_id][4] = PUBREL
           save_everytime()
           pubrel(packet_id)
         else
@@ -415,10 +432,10 @@ class Mqtt3
 
     when PUBCOMP
       packet_id = decode_short(data)
-      p = @qos2store[packet_id]
+      p = @outgoing_qos2_store[packet_id]
       unless p.nil?
         if p[4] == PUBREL
-          @qos2store.delete(packet_id)
+          @outgoing_qos2_store.delete(packet_id)
           @on_publish_finished_block.call(packet_id) unless @on_publish_finished_block.nil?
           save_everytime()
         else
@@ -493,7 +510,7 @@ class Mqtt3
     if @persistence_filename
       File.open(@persistence_filename,"w+") do |f|
         debug "saving state to " + @persistence_filename
-        f.write Marshal.dump([@qos1store,@qos2store])
+        f.write Marshal.dump([@outgoing_qos1_store,@outgoing_qos2_store,@incoming_qos1_store,@incoming_qos2_store])
       end
     end
   end
@@ -555,8 +572,8 @@ class Mqtt3
         end
       else
         if File.exist?(@persistence_filename)
-          @qos1store, @qos2store = Marshal.load(File.read(@persistence_filename))
-          debug "loading state from #{@persistence_filename}  QoS1:#{@qos1store.inspect}  QoS2:#{@qos2store.inspect}"
+          @outgoing_qos1_store, @outgoing_qos2_store, @incoming_qos1_store, @incoming_qos2_store = Marshal.load(File.read(@persistence_filename))
+          debug "loading state from #{@persistence_filename}  out_QoS1:#{@outgoing_qos1_store.inspect}  out_QoS2:#{@outgoing_qos2_store.inspect}  in_QoS1: #{@incoming_qos1_store.inspect}  in_QoS2: #{@incoming_qos2_store.inspect}"
         end
       end
     end
