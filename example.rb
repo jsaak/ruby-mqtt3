@@ -42,6 +42,12 @@ end
 
 m.on_tcp_connect_error do |e,counter|
   m.debug e.inspect + ", waiting #{counter} sec"
+  sleep counter
+  false
+end
+
+m.on_tcp_connect_error do |e,counter|
+  m.debug e.inspect + ", waiting #{counter} sec"
   true
 end
 

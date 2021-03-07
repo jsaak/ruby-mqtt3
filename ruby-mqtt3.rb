@@ -498,6 +498,8 @@ class Mqtt3
             counter *= 2
             counter = 300 if counter > 300
           end
+        else
+          counter += 1
         end
 
         retry
@@ -546,27 +548,20 @@ class Mqtt3
   end
 
   def init_ssl
-    if (@ssl &&
-        (@ssl_cert or @ssl_cert_file) &&
-        (@ssl_ca_file) &&
-        (@ssl_key or @ssl_key_file))
+    @ssl_cert = File.read(@ssl_cert_file) if @ssl_cert_file
+    @ssl_key = File.read(@ssl_key_file) if @ssl_key_file
 
-      @ssl_cert = File.read(@ssl_cert_file) if @ssl_cert_file
-      @ssl_key = File.read(@ssl_key_file) if @ssl_key_file
+    @ssl_context = OpenSSL::SSL::SSLContext.new
 
-      @ssl_context = OpenSSL::SSL::SSLContext.new
-
-      unless @ssl.is_a?(TrueClass)
-        @ssl_context.ssl_version = @ssl
-      end
-
-      @ssl_context.cert = OpenSSL::X509::Certificate.new(@ssl_cert)
-      @ssl_context.key  = OpenSSL::PKey::RSA.new(@ssl_key, @ssl_passphrase)
-      @ssl_context.ca_file  = @ssl_ca_file
-      @ssl_context.verify_mode = OpenSSL::SSL::VERIFY_PEER
-    else
-      raise "missing ssl param"
+    unless @ssl.is_a?(TrueClass)
+      @ssl_context.ssl_version = @ssl
     end
+
+    @ssl_context.cert = OpenSSL::X509::Certificate.new(@ssl_cert) if @ssl_cert
+    @ssl_context.key  = OpenSSL::PKey::RSA.new(@ssl_key, @ssl_passphrase) if @ssl_key
+    @ssl_context.ca_file  = @ssl_ca_file if @ssl_ca_file
+
+    @ssl_context.verify_mode = OpenSSL::SSL::VERIFY_PEER
   end
 
   def run
