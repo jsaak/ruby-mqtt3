@@ -233,8 +233,6 @@ class Mqtt3
     packet = "\x42\x02".force_encoding('ASCII-8BIT') #PUBACK
     packet += encode_short(packet_id)
     send_packet(packet)
-    @incoming_qos1_store.delete packet_id
-    save_everytime
   end
 
   def pubrec(packet_id)
@@ -253,8 +251,6 @@ class Mqtt3
     packet = "\x72\x02".force_encoding('ASCII-8BIT') #PUBCOMP
     packet += encode_short(packet_id)
     send_packet(packet)
-    @incoming_qos2_store.delete packet_id
-    save_everytime
   end
 
   def next_packet_id
@@ -306,8 +302,8 @@ class Mqtt3
   end
 
   def send_packet(p)
-    return if state == :disconnected
-    return if state == :tcp_connected && ((p[0].ord >> 4) != CONNECT)
+    return false if state == :disconnected
+    return false if state == :tcp_connected && ((p[0].ord >> 4) != CONNECT)
 
     debug '--- ' + MQTT_PACKET_TYPES[p[0].ord >> 4] + ' flags: ' + (p[0].ord & 0x0f).to_s + '  ' + p.unpack('H*').first
 
@@ -317,6 +313,7 @@ class Mqtt3
     rescue => e
       raise e
     end
+    return true
   end
 
   def on_connect(&block)
@@ -386,12 +383,18 @@ class Mqtt3
       if qos == 0
         @on_message_block.call(topic, message, qos, packet_id) unless @on_message_block.nil?
       elsif qos == 1
-        puback(packet_id)
         if @incoming_qos1_store[packet_id].nil?
           @incoming_qos1_store[packet_id] = true
           save_everytime
           @on_message_block.call(topic, message, qos, packet_id) unless @on_message_block.nil?
         end
+
+        sent = puback(packet_id)
+        if sent
+          @incoming_qos1_store.delete packet_id
+          save_everytime
+        end
+
       elsif qos == 2
         pubrec(packet_id)
         if @incoming_qos2_store[packet_id].nil?
@@ -418,17 +421,21 @@ class Mqtt3
         if p[4] == PUBLISH
           @outgoing_qos2_store[packet_id][4] = PUBREL
           save_everytime()
-          pubrel(packet_id)
         else
           debug "WARNING: PUBREC #{packet_id} not in PUBLISH state"
         end
       else
         debug "WARNING: PUBREC #{packet_id} not found"
       end
+      pubrel(packet_id)
 
     when PUBREL
       packet_id = decode_short(data)
-      pubcomp(packet_id)
+      sent = pubcomp(packet_id)
+      if sent
+        @incoming_qos2_store.delete packet_id
+        save_everytime
+      end
 
     when PUBCOMP
       packet_id = decode_short(data)
