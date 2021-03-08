@@ -32,15 +32,17 @@ You have to decide what guarantees you need, I think `:persistence_manual` is a 
 
 ## Not supported
 
-websocket is not supported, but should not be too hard using:
+### websocket is not supported, but should not be too hard using:
 
-https://github.com/imanel/websocket-ruby
+https://github.com/socketry/protocol-websocket or
 
-rewriting this to use ruby 3 Fibers:
+https://github.com/socketry/async-websocket or
 
+https://github.com/imanel/websocket-ruby and
 https://github.com/imanel/websocket-eventmachine-client
 
-MQTT 5.0 not supported, yet
+
+###MQTT 5.0 not supported, yet
 
 ## Notes
 
