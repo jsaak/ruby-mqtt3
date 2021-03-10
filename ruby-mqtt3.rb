@@ -1,6 +1,6 @@
 require 'openssl'
 
-class Mqtt3TcpDisconnected < Exception
+class Mqtt3NormalExitException < Exception
 end
 
 class Mqtt3
@@ -127,7 +127,6 @@ class Mqtt3
     @incoming_qos1_store = Hash.new
     @incoming_qos2_store = Hash.new
     @packet_id = 0
-    @running = true
     @state = :disconnected
   end
 
@@ -307,12 +306,8 @@ class Mqtt3
 
     debug '--- ' + MQTT_PACKET_TYPES[p[0].ord >> 4] + ' flags: ' + (p[0].ord & 0x0f).to_s + '  ' + p.unpack('H*').first
 
-    begin
-      @socket.write(p)
-      @last_packet_sent_at = Time.now
-    rescue => e
-      raise e
-    end
+    @socket.write(p)
+    @last_packet_sent_at = Time.now
     return true
   end
 
@@ -465,50 +460,6 @@ class Mqtt3
     end
   end
 
-  def tcp_connect()
-    counter = 0
-    begin
-      tcp_socket = TCPSocket.new(@host, @port, connect_timeout: 1)
-
-      if @ssl
-        @socket = OpenSSL::SSL::SSLSocket.new(tcp_socket, @ssl_context)
-        @socket.sync_close = true
-        # Set hostname on secure socket for Server Name Indication (SNI)
-        #TODO ??? @socket.hostname = @host if @socket.respond_to?(:hostname=)
-        @socket.connect
-      else
-        @socket = tcp_socket
-      end
-
-      @state = :tcp_connected
-      debug 'TCP connected'
-      return @socket
-    rescue => e
-      default = true
-      default = @on_tcp_connect_error_block.call(e,counter) unless @on_tcp_connect_error_block.nil?
-      if @reconnect
-        if default
-          if counter > 0
-            sleep counter
-          end
-
-          if counter == 0
-            counter = 1
-          else
-            counter *= 2
-            counter = 300 if counter > 300
-          end
-        else
-          counter += 1
-        end
-
-        retry
-      else
-        @running = false
-      end
-    end
-  end
-
   def save_everytime
     if @persistence_filename && (@persistence_mode == :save_everytime)
       save
@@ -524,25 +475,16 @@ class Mqtt3
     end
   end
 
-  def recv_bytes(count)
+  def read_bytes(count)
     buffer = ''
     while buffer.length != count
       #TODO rescue
       chunk = @socket.read(count - buffer.length)
-      if chunk == ''
-        @state = :disconnected
-
-        @on_disconnect_block.call unless @on_disconnect_block.nil?
-        if @reconnect
-          @socket = tcp_connect()
-          connect()
-        else
-          @running = false
-          raise Mqtt3TcpDisconnected
-        end
+      if chunk == '' || chunk.nil?
+        raise Mqtt3NormalExitException
+      else
+        buffer += chunk
       end
-
-      buffer += chunk
     end
     return buffer
   end
@@ -565,6 +507,16 @@ class Mqtt3
   end
 
   def run
+    Fiber.schedule do
+
+  def debug(x)
+    if @debug
+      print Time.now.strftime('%Y.%m.%d %H:%M:%S.%L ')
+      puts x
+    end
+  end
+
+  def run
     #persistence
     if @persistence_filename
       if @clean_session
@@ -581,40 +533,57 @@ class Mqtt3
     end
 
     Fiber.schedule do
-      @socket = tcp_connect()
+      @fiber_main = Fiber.current
+      counter = 0
+      while @reconnect do
+        ret = tcp_connect()
+        if ret.is_a? (Exception)
+          @on_tcp_connect_error_block.call(e,counter) unless @on_tcp_connect_error_block.nil?
+        else
+          @socket = ret
+          @state = :tcp_connected
+          counter = 0
+          debug 'TCP connected'
+          @fiber_ping = run_fiber_ping
 
-      Fiber.schedule do
-        #puts 'entering recv fiber'
-        while @running do
-          begin
-            x = recv_bytes(1).ord
-            type = (x & 0xf0) >> 4
-            flags = x & 0x0f
+          e = read_from_socket_loop()
 
-            # Read in the packet length
-            multiplier = 1
-            length = 0
-            pos = 1
+          @fiber_ping.raise(Mqtt3NormalExitException)
+          @state = :disconnected
+          @on_disconnect_block.call(e) unless @on_disconnect_block.nil?
+        end
 
-            loop do
-              digit = recv_bytes(1).ord
-              length += ((digit & 0x7F) * multiplier)
-              multiplier *= 0x80
-              pos += 1
-              break if (digit & 0x80).zero? || pos > 4
+        if @reconnect
+          if @on_reconnect_block
+            @on_reconnect_block.call(counter)
+            counter += 1
+          else
+            if counter > 0
+              sleep counter
             end
 
-            data = recv_bytes(length)
-            handle_packet(type, flags, length, data)
-          rescue Mqtt3TcpDisconnected
+            if counter == 0
+              counter = 1
+            else
+              counter *= 2
+              counter = 300 if counter > 300
+            end
           end
         end
-        puts 'exiting recv fiber'
       end
+    end
+  end
 
-      Fiber.schedule do
-        #puts 'entering ping fiber' if @debug
-        while @running do
+  def stop
+    @fiber_main.raise(Mqtt3NormalExitException)
+    @fiber_ping.raise(Mqtt3NormalExitException) if @fiber_ping
+  end
+
+  def run_fiber_ping
+    fiber_ping = Fiber.schedule do
+      #debug 'entering ping fiber'
+      begin
+        loop do
           if @last_packet_sent_at.nil? || @state != :mqtt_connected
             #debug "sleeping for #{@keepalive_sec} sec"
             sleep @keepalive_sec
@@ -627,19 +596,57 @@ class Mqtt3
             pingreq
           end
         end
-        puts 'exiting ping fiber'
+      rescue Mqtt3NormalExitException
+      end
+      #debug 'exiting ping fiber'
+    end
+    return fiber_ping
+  end
+
+  def tcp_connect
+    begin
+      tcp_socket = TCPSocket.new(@host, @port, connect_timeout: 1)
+
+      if @ssl
+        socket = OpenSSL::SSL::SSLSocket.new(tcp_socket, @ssl_context)
+        socket.sync_close = true
+        # Set hostname on secure socket for Server Name Indication (SNI)
+        #TODO ??? socket.hostname = @host if socket.respond_to?(:hostname=)
+        socket.connect
+      else
+        socket = tcp_socket
       end
 
-      if @running
-        connect()
-      end
+      return socket
+    rescue => e
+      return e
     end
   end
 
-  def debug(x)
-    if @debug
-      print Time.now.strftime('%Y.%m.%d %H:%M:%S.%L ')
-      puts x
+  def read_from_socket_loop
+    begin
+      loop do
+        x = read_bytes(1).ord
+        type = (x & 0xf0) >> 4
+        flags = x & 0x0f
+
+        # Read in the packet length
+        multiplier = 1
+        length = 0
+        pos = 1
+
+        loop do
+          digit = read_bytes(1).ord
+          length += ((digit & 0x7F) * multiplier)
+          multiplier *= 0x80
+          pos += 1
+          break if (digit & 0x80).zero? || pos > 4
+        end
+
+        data = read_bytes(length)
+        handle_packet(type, flags, length, data)
+      end
+    rescue Mqtt3NormalExitException
     end
   end
 end
