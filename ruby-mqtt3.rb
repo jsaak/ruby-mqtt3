@@ -376,7 +376,7 @@ class Mqtt3
     when PUBLISH
       qos = (flags & 6) >> 1
       topic_length = decode_short(data[0..1])
-      topic = data[2..topic_length+2]
+      topic = data[2..topic_length+1]
       packet_id = decode_short(data[topic_length+2..topic_length+3])
       message = data[topic_length+4..-1]
 
