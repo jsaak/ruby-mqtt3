@@ -371,7 +371,7 @@ class Mqtt3
     when PUBLISH
       qos = (flags & 6) >> 1
       topic_length = decode_short(data[0..1])
-      topic = data[2..topic_length+2]
+      topic = data[2..topic_length+1]
       packet_id = decode_short(data[topic_length+2..topic_length+3])
       message = data[topic_length+4..-1]
 
@@ -506,9 +506,6 @@ class Mqtt3
     @ssl_context.verify_mode = OpenSSL::SSL::VERIFY_PEER
   end
 
-  def run
-    Fiber.schedule do
-
   def debug(x)
     if @debug
       print Time.now.strftime('%Y.%m.%d %H:%M:%S.%L ')
@@ -534,6 +531,7 @@ class Mqtt3
 
     Fiber.schedule do
       @fiber_main = Fiber.current
+      #debug 'entering main fiber' + @fiber_main.inspect
       counter = 0
       while @reconnect do
         ret = tcp_connect()
@@ -544,11 +542,19 @@ class Mqtt3
           @state = :tcp_connected
           counter = 0
           debug 'TCP connected'
+          connect
+
           @fiber_ping = run_fiber_ping
 
-          e = read_from_socket_loop()
+          begin
+            e = read_from_socket_loop()
+          rescue Mqtt3NormalExitException
+            @reconnect = false
+          rescue
+          end
 
           @fiber_ping.raise(Mqtt3NormalExitException)
+
           @state = :disconnected
           @on_disconnect_block.call(e) unless @on_disconnect_block.nil?
         end
@@ -571,17 +577,18 @@ class Mqtt3
           end
         end
       end
+      #debug 'exiting main fiber' + @fiber_main.inspect
     end
   end
 
   def stop
+    #puts "sending raise to #{@fiber_main}"
     @fiber_main.raise(Mqtt3NormalExitException)
-    @fiber_ping.raise(Mqtt3NormalExitException) if @fiber_ping
   end
 
   def run_fiber_ping
     fiber_ping = Fiber.schedule do
-      #debug 'entering ping fiber'
+      #debug 'entering ping fiber' + Fiber.current.inspect
       begin
         loop do
           if @last_packet_sent_at.nil? || @state != :mqtt_connected
@@ -598,7 +605,7 @@ class Mqtt3
         end
       rescue Mqtt3NormalExitException
       end
-      #debug 'exiting ping fiber'
+      #debug 'exiting ping fiber' + @fiber_ping.inspect
     end
     return fiber_ping
   end
@@ -624,29 +631,26 @@ class Mqtt3
   end
 
   def read_from_socket_loop
-    begin
+    loop do
+      x = read_bytes(1).ord
+      type = (x & 0xf0) >> 4
+      flags = x & 0x0f
+
+      # Read in the packet length
+      multiplier = 1
+      length = 0
+      pos = 1
+
       loop do
-        x = read_bytes(1).ord
-        type = (x & 0xf0) >> 4
-        flags = x & 0x0f
-
-        # Read in the packet length
-        multiplier = 1
-        length = 0
-        pos = 1
-
-        loop do
-          digit = read_bytes(1).ord
-          length += ((digit & 0x7F) * multiplier)
-          multiplier *= 0x80
-          pos += 1
-          break if (digit & 0x80).zero? || pos > 4
-        end
-
-        data = read_bytes(length)
-        handle_packet(type, flags, length, data)
+        digit = read_bytes(1).ord
+        length += ((digit & 0x7F) * multiplier)
+        multiplier *= 0x80
+        pos += 1
+        break if (digit & 0x80).zero? || pos > 4
       end
-    rescue Mqtt3NormalExitException
+
+      data = read_bytes(length)
+      handle_packet(type, flags, length, data)
     end
   end
 end
