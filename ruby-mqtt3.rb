@@ -372,8 +372,15 @@ class Mqtt3
       qos = (flags & 6) >> 1
       topic_length = decode_short(data[0..1])
       topic = data[2..topic_length+1]
-      packet_id = decode_short(data[topic_length+2..topic_length+3])
-      message = data[topic_length+4..-1]
+
+      if (qos > 0)
+        packet_id = decode_short(data[topic_length+2..topic_length+3])
+        message_starts_at = 4
+      else
+        packet_id = nil
+        message_starts_at = 2
+      end
+      message = data[topic_length+message_starts_at..-1]
 
       if qos == 0
         @on_message_block.call(topic, message, qos, packet_id) unless @on_message_block.nil?
