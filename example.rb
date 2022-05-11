@@ -1,4 +1,4 @@
-require './ruby-mqtt3'
+require './lib/ruby-mqtt3'
 require 'pp'
 
 backend = 'async'
