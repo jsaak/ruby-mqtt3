@@ -1,20 +1,22 @@
-require './lib/ruby-mqtt3'
-require 'pp'
-
-backend = 'async'
+backend = 'async_v1'
+#backend = 'async_v2'
 # backend = 'libev'
 
-if backend == 'async'
-  require 'async'
-else
+require './lib/ruby-mqtt3'
+
+if backend == 'libev'
   require 'libev_scheduler'
+else
+  require 'async'
 end
 require 'fiber'
 require 'socket'
 
-if backend == 'async'
+if backend == 'async_v1'
   reactor = Async::Reactor.new
   scheduler = Async::Scheduler.new(reactor)
+elsif backend == 'async_v2'
+  scheduler = Async::Scheduler.new
 else
   scheduler = Libev::Scheduler.new
 end
@@ -23,8 +25,8 @@ Fiber.set_scheduler scheduler
 
 m = Mqtt3.new(keepalive_sec: 30,
               persistence_filename: 'persist.data',
-              clean_session: false,
-              reconnect: true,
+              clean_session: true,
+              reconnect: false,
               host: 'localhost',
               port: '1883',
              )
@@ -81,7 +83,7 @@ Fiber.schedule do
   #m.stop
 end
 
-if backend == 'async'
+if backend == 'async_v1'
   reactor.run
 else
   scheduler.run

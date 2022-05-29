@@ -3,6 +3,9 @@ require 'openssl'
 class Mqtt3NormalExitException < Exception
 end
 
+class Mqtt3AbnormalExitException < Exception
+end
+
 class Mqtt3
   attr_accessor :debug
 
@@ -229,25 +232,25 @@ class Mqtt3
   end
 
   def puback(packet_id)
-    packet = "\x42\x02".force_encoding('ASCII-8BIT') #PUBACK
+    packet = "\x40\x02".force_encoding('ASCII-8BIT') #PUBACK
     packet += encode_short(packet_id)
     send_packet(packet)
   end
 
   def pubrec(packet_id)
-    packet = "\x52\x02".force_encoding('ASCII-8BIT') #PUBREC
+    packet = "\x50\x02".force_encoding('ASCII-8BIT') #PUBREC
     packet += encode_short(packet_id)
     send_packet(packet)
   end
 
   def pubrel(packet_id)
-    packet = "\x62\x02".force_encoding('ASCII-8BIT') #PUBREL
+    packet = "\x60\x02".force_encoding('ASCII-8BIT') #PUBREL
     packet += encode_short(packet_id)
     send_packet(packet)
   end
 
   def pubcomp(packet_id)
-    packet = "\x72\x02".force_encoding('ASCII-8BIT') #PUBCOMP
+    packet = "\x70\x02".force_encoding('ASCII-8BIT') #PUBCOMP
     packet += encode_short(packet_id)
     send_packet(packet)
   end
@@ -488,7 +491,7 @@ class Mqtt3
       #TODO rescue
       chunk = @socket.read(count - buffer.length)
       if chunk == '' || chunk.nil?
-        raise Mqtt3NormalExitException
+        raise Mqtt3AbnormalExitException
       else
         buffer += chunk
       end
@@ -540,7 +543,7 @@ class Mqtt3
       @fiber_main = Fiber.current
       #debug 'entering main fiber' + @fiber_main.inspect
       counter = 0
-      while @reconnect do
+      loop do
         ret = tcp_connect()
         if ret.is_a? (Exception)
           @on_tcp_connect_error_block.call(e,counter) unless @on_tcp_connect_error_block.nil?
@@ -557,6 +560,7 @@ class Mqtt3
             e = read_from_socket_loop()
           rescue Mqtt3NormalExitException
             @reconnect = false
+          rescue Mqtt3AbnormalExitException
           rescue
           end
 
@@ -583,6 +587,7 @@ class Mqtt3
             end
           end
         end
+        break unless @reconnect
       end
       #debug 'exiting main fiber' + @fiber_main.inspect
     end
