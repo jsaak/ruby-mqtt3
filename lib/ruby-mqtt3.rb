@@ -460,6 +460,7 @@ class Mqtt3
     when SUBACK
       # for each topic
       #@on_subscribe_block.call(topic_name, packet_id, ret)
+      @on_subscribe_block.call(nil, nil, nil)
 
     when PINGREQ
       pingresp
