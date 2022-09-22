@@ -543,7 +543,7 @@ class Mqtt3
       while @reconnect do
         ret = tcp_connect()
         if ret.is_a? (Exception)
-          @on_tcp_connect_error_block.call(e,counter) unless @on_tcp_connect_error_block.nil?
+          @on_tcp_connect_error_block.call(ret,counter) unless @on_tcp_connect_error_block.nil?
         else
           @socket = ret
           @state = :tcp_connected
