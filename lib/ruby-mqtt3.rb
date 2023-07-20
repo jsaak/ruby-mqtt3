@@ -460,7 +460,7 @@ class Mqtt3
     when SUBACK
       # for each topic
       #@on_subscribe_block.call(topic_name, packet_id, ret)
-      @on_subscribe_block.call(nil, nil, nil)
+      @on_subscribe_block.call(nil, nil, nil) unless @on_subscribe_block.nil?
 
     when PINGREQ
       pingresp
@@ -562,7 +562,6 @@ class Mqtt3
           rescue Mqtt3NormalExitException
             @reconnect = false
           rescue Mqtt3AbnormalExitException
-          rescue
           end
 
           @fiber_ping.raise(Mqtt3NormalExitException)
