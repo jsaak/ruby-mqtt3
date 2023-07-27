@@ -6,6 +6,10 @@ end
 class Mqtt3AbnormalExitException < Exception
 end
 
+class Mqtt3PingTimeoutException < Exception
+end
+          
+
 class Mqtt3
   attr_accessor :debug
 
@@ -131,6 +135,7 @@ class Mqtt3
     @incoming_qos2_store = Hash.new
     @packet_id = 0
     @state = :disconnected
+    @unanswered_ping_count = 0
   end
 
   def pingreq
@@ -244,7 +249,7 @@ class Mqtt3
   end
 
   def pubrel(packet_id)
-    packet = "\x60\x02".force_encoding('ASCII-8BIT') #PUBREL
+    packet = "\x62\x02".force_encoding('ASCII-8BIT') #PUBREL
     packet += encode_short(packet_id)
     send_packet(packet)
   end
@@ -304,12 +309,16 @@ class Mqtt3
   end
 
   def send_packet(p)
-    return false if state == :disconnected
-    return false if state == :tcp_connected && ((p[0].ord >> 4) != CONNECT)
+    return false if @state == :disconnected
+    return false if @state == :tcp_connected && ((p[0].ord >> 4) != CONNECT)
 
     debug '--- ' + MQTT_PACKET_TYPES[p[0].ord >> 4] + ' flags: ' + (p[0].ord & 0x0f).to_s + '  ' + p.unpack('H*').first
 
-    @socket.write(p)
+    begin
+      @socket.write(p)
+    rescue Errno::EPIPE
+      raise Mqtt3AbnormalExitException
+    end
     @last_packet_sent_at = Time.now
     return true
   end
@@ -349,6 +358,7 @@ class Mqtt3
       return_code = data[1].ord
       if return_code == 0
         @state = :mqtt_connected
+        @unanswered_ping_count = 0
         session_present = (data[0].ord == 1)
         @on_connect_block.call(session_present) unless @on_connect_block.nil?
 
@@ -358,11 +368,11 @@ class Mqtt3
           publish_dup(m[0],m[1],m[2],m[3],true,packet_id)
         end
         @outgoing_qos2_store.each do |packet_id,m|
-          state = m[4]
-          if state == PUBLISH
+          packet_state = m[4]
+          if packet_state == PUBLISH
             debug "resending QoS 2 packet PUBLISH #{packet_id} #{m[0]} #{m[1]}"
             publish_dup(m[0],m[1],m[2],m[3],true,packet_id)
-          elsif state == PUBREL
+          elsif packet_state == PUBREL
             debug "resending QoS 2 packet PUBREL #{packet_id} #{m[0]} #{m[1]}"
             pubrel(packet_id)
           end
@@ -466,6 +476,7 @@ class Mqtt3
       pingresp
 
     when PINGRESP
+      @unanswered_ping_count -= 1
     else
       debug "WARNING: packet type: #{type} is not handled"
     end
@@ -489,8 +500,20 @@ class Mqtt3
   def read_bytes(count)
     buffer = ''
     while buffer.length != count
-      #TODO rescue
-      chunk = @socket.read(count - buffer.length)
+
+      begin
+        chunk = @socket.read(count - buffer.length)
+      rescue Errno::ECONNRESET
+        raise Mqtt3AbnormalExitException
+      rescue Errno::ETIMEDOUT
+        raise Mqtt3AbnormalExitException
+      #rescue IOError => e
+        #if (e.message == 'closed_stream'
+        #puts e.message
+        #puts e.inspect
+        #pp e
+      end
+
       if chunk == '' || chunk.nil?
         raise Mqtt3AbnormalExitException
       else
@@ -545,6 +568,7 @@ class Mqtt3
       #debug 'entering main fiber' + @fiber_main.inspect
       counter = 0
       loop do
+        debug "connencting to #{@host}:#{@port}"
         ret = tcp_connect()
         if ret.is_a? (Exception)
           @on_tcp_connect_error_block.call(ret,counter) unless @on_tcp_connect_error_block.nil?
@@ -560,23 +584,30 @@ class Mqtt3
           begin
             e = read_from_socket_loop()
           rescue Mqtt3NormalExitException
-            @reconnect = false
+            stop_internal
           rescue Mqtt3AbnormalExitException
+            Fiber.scheduler.raise(@fiber_ping,Mqtt3NormalExitException)
+          rescue Mqtt3PingTimeoutException
           end
 
-          @fiber_ping.raise(Mqtt3NormalExitException)
-
           @state = :disconnected
-          @on_disconnect_block.call(e) unless @on_disconnect_block.nil?
+          @on_disconnect_block.call() unless @on_disconnect_block.nil?
         end
 
         if @reconnect
+          #puts 'reconnect'
           if @on_reconnect_block
             @on_reconnect_block.call(counter)
             counter += 1
           else
             if counter > 0
-              sleep counter
+              begin
+                sleep counter
+              rescue Mqtt3NormalExitException => e
+                # we want to stop trying to reconnect
+                stop_internal
+                break
+              end
             end
 
             if counter == 0
@@ -593,9 +624,28 @@ class Mqtt3
     end
   end
 
+  def stop_internal
+    @reconnect = false
+    if @state == :mqtt_connected
+      disconnect
+      @socket.close
+      Fiber.scheduler.raise(@fiber_ping,Mqtt3NormalExitException)
+    elsif @state == :tcp_connected
+      @socket.close
+    end
+  end
+
   def stop
-    #puts "sending raise to #{@fiber_main}"
-    @fiber_main.raise(Mqtt3NormalExitException)
+    unless @fiber_main.alive?
+      debug 'already stopped'
+      return
+    end
+
+    if Fiber.current == @fiber_main
+      raise Mqtt3NormalExitException
+    else
+      Fiber.scheduler.raise(@fiber_main,Mqtt3NormalExitException)
+    end
   end
 
   def run_fiber_ping
@@ -612,11 +662,16 @@ class Mqtt3
               #debug "sleeping for #{t} sec"
               sleep t
             end
+            if @unanswered_ping_count > 1
+              Fiber.scheduler.raise(@fiber_main,Mqtt3PingTimeoutException)
+            end
             pingreq
+            @unanswered_ping_count += 1
           end
         end
       rescue Mqtt3NormalExitException
       end
+
       #debug 'exiting ping fiber' + @fiber_ping.inspect
     end
     return fiber_ping

@@ -1,5 +1,5 @@
-backend = 'async_v1'
-#backend = 'async_v2'
+#backend = 'async_v1'
+backend = 'async_v2'
 # backend = 'libev'
 
 require './lib/ruby-mqtt3'
@@ -42,15 +42,17 @@ m.on_connect do |session_present|
   m.subscribe [['test',2],['test2',0]]
   #m.invalid
   #puts session_present
-  m.publish('test','message')
+  #m.publish('test','message')
 end
 
+# custom sleep logic on_tcp_connect_error
 m.on_tcp_connect_error do |e,counter|
   m.debug e.inspect + ", waiting #{counter} sec"
   sleep counter
   false
 end
 
+# default sleep logic on_tcp_connect_error
 m.on_tcp_connect_error do |e,counter|
   m.debug e.inspect + ", waiting #{counter} sec"
   true
@@ -79,13 +81,14 @@ m.run
 Fiber.schedule do
   sleep 1
   packet_id = m.publish 'test', 'demo', 2
-  m.invalid
-  #m.stop
+  #m.invalid
+  sleep 1
+  m.stop
 end
 
 if backend == 'async_v1'
   reactor.run
-else
+elsif backend == 'libev'
   scheduler.run
 end
 
