@@ -1,12 +1,12 @@
 require 'openssl'
 
-class Mqtt3NormalExitException < Exception
+class Mqtt3NormalExitException < RuntimeError
 end
 
-class Mqtt3AbnormalExitException < Exception
+class Mqtt3AbnormalExitException < RuntimeError
 end
 
-class Mqtt3PingTimeoutException < Exception
+class Mqtt3PingTimeoutException < RuntimeError
 end
           
 
@@ -569,11 +569,25 @@ class Mqtt3
       counter = 0
       loop do
         debug "connencting to #{@host}:#{@port}"
-        ret = tcp_connect()
-        if ret.is_a? (Exception)
-          @on_tcp_connect_error_block.call(ret,counter) unless @on_tcp_connect_error_block.nil?
-        else
-          @socket = ret
+        begin
+          connected = false
+          tcp_socket = TCPSocket.new(@host, @port, connect_timeout: 1)
+
+          if @ssl
+            @socket = OpenSSL::SSL::SSLSocket.new(tcp_socket, @ssl_context)
+            @socket.sync_close = true
+            @socket.connect
+          else
+            @socket = tcp_socket
+          end
+          connected = true
+        rescue Mqtt3NormalExitException
+          @reconnect = false
+        rescue Exception => e
+          @on_tcp_connect_error_block.call(e,counter) unless @on_tcp_connect_error_block.nil?
+        end
+
+        if connected
           @state = :tcp_connected
           counter = 0
           debug 'TCP connected'
@@ -675,26 +689,6 @@ class Mqtt3
       #debug 'exiting ping fiber' + @fiber_ping.inspect
     end
     return fiber_ping
-  end
-
-  def tcp_connect
-    begin
-      tcp_socket = TCPSocket.new(@host, @port, connect_timeout: 1)
-
-      if @ssl
-        socket = OpenSSL::SSL::SSLSocket.new(tcp_socket, @ssl_context)
-        socket.sync_close = true
-        # Set hostname on secure socket for Server Name Indication (SNI)
-        #TODO ??? socket.hostname = @host if socket.respond_to?(:hostname=)
-        socket.connect
-      else
-        socket = tcp_socket
-      end
-
-      return socket
-    rescue => e
-      return e
-    end
   end
 
   def read_from_socket_loop
